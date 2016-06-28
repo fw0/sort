@@ -1,5 +1,7 @@
 import numpy as np
 import tensorflow as tf
+from collections import namedtuple
+import pdb
 
 class model(object):
     """
@@ -11,7 +13,7 @@ class model(object):
     p: the probability of clicking (y=1)
     y: the binary decision
     """
-    def add_placeholders(self)
+    def add_placeholders(self):
         raise NotImplementedError
 
     def add_u_ts(self, *placeholders):
@@ -26,91 +28,111 @@ class model(object):
     def add_c(self, s_ts, a_ts):
         raise NotImplementedError
 
-    def add_p(self, c):
+    def add_score_and_p(self, c):
         raise NotImplementedError
 
     def add_loss(self, y, p):
         raise NotImplementedError
 
+
+    
 class config(object):
 
-    initializer = tf.contrib.layers.xavier_initializer()
+    initializer = tf.contrib.layers.xavier_initializer
 
-    x_dim = 50
-    num_steps = 25
-    u_dim = 100
-    s_dim = 25
+    batch_size = 8
+    
+    x_dim = 5
+    num_steps = 4
+    u_dim = 3
+    s_dim = 2
+    num_classes = 2
 
     lr = 0.001
 
+    reg = 1.0
+
 class basic_model(model):
 
-    def __init__(self, config, data_iterator):
-        self.config, self.data_iterator = config, data_iterator
+    def __init__(self, config):
+        self.config = config
+        self.add_placeholders()
+        self.u_ts = self.add_u_ts()
+        self.s_ts = self.add_s_ts(self.u_ts)
+        self.a_ts = self.add_a_ts(self.s_ts, self.u_ts)
+        self.c = self.add_c(self.a_ts, self.s_ts)
+        self.score, self.p = self.add_score_and_p(self.c)
+        self.loss = self.add_loss(self.label_ph, self.score)
+        self.regularization = self.add_regularization()
+        self.training_op = self.add_training_op(self.loss, self.regularization)
 
-    def add_placeholders(self, x_ts, y_ts):
+    def set_data(self, data_iterator):
+        self.data_iterator = data_iterator
+        
+    def add_placeholders(self):
         self.input_ph = [tf.placeholder(tf.float32, shape=[None, self.config.x_dim]) for i in xrange(self.config.num_steps)]
-        self.label_ph = tf.placeholder(tf.float32, shape=[None])
+        self.label_ph = tf.placeholder(tf.float32, shape=[None, 2])
 
-    def add_u_ts(self, input_ph):
-        self.u_ts = [None for i in xrange(self.config.num_steps)]
-        with tf.variable_scope('u', initializer = self.config.initializer):
-            self.W_xu = tf.get_variable('W_xu', [self.config.x_dim, self.config.u_dim])
-            for i in xrange(xrange(self.config.num_steps)):
-                self.u_ts[i] = tf.matmul(self.input_ph[i], self.W_xu)
-        return self.u_ts
+    def add_u_ts(self):
+        u_ts = [None for i in xrange(self.config.num_steps)]
+        with tf.variable_scope('u', initializer = self.config.initializer()):
+            self.W_xu = tf.get_variable('W_xu', shape=[self.config.x_dim, self.config.u_dim])
+            for i in xrange(self.config.num_steps):
+                u_ts[i] = tf.matmul(self.input_ph[i], self.W_xu)
+        return u_ts
 
     def add_s_ts(self, u_ts):
-        self.s_ts = [None for i in xrange(self.config.num_steps)]
-        with tf.variable_scope('s', initializer = self.config.initializer):
+        s_ts = [None for i in xrange(self.config.num_steps)]
+        with tf.variable_scope('s', initializer = self.config.initializer()):
             self.W_ss = tf.get_variable('W_ss', [self.config.s_dim, self.config.s_dim])
             self.W_us = tf.get_variable('W_us', [self.config.u_dim, self.config.s_dim])
-            self.b_s = tf.get_variable('b_s', [self.config.s_dim])
+            self.b_s = tf.get_variable('b_s', [1, self.config.s_dim])
             for i in xrange(self.config.num_steps):
                 if i != 0:
-                    self.s_ts[i] = tf.sigmoid(tf.matmul(self.s_ts[i-1], self.W_ss) + tf.matmul(self.u_ts[i], self.W_us) + self.b_s)
+                    s_ts[i] = tf.sigmoid(tf.matmul(s_ts[i-1], self.W_ss) + tf.matmul(u_ts[i], self.W_us) + self.b_s)
                 elif i == 0:
-                    self.s_ts[i] = tf.sigmoid(tf.matmul(tf.ones(self.config.batch_size, self.config.s_dim), self.W_ss) + tf.matmul(self.u_ts[i], self.W_us) + self.b_s)
+                    s_ts[i] = tf.sigmoid(tf.matmul(tf.ones((self.config.batch_size, self.config.s_dim)), self.W_ss) + tf.matmul(u_ts[i], self.W_us) + self.b_s)
                 else:
                     assert False
-        return self.s_ts
+        return s_ts
 
-    def add_a_ts(self, s_ts):
-        with tf.variable_scope('a', initializer = self.config.initializer):
-            self.w_sa = tf.get_variable('w_sa', [self.config.s_dim])
-            self.w_ua = tf.get_variable('w_ua', [self.config.s_dim])
-            eps = [None for i in self.config.num_steps]
-            for i in self.config.num_steps:
-                eps[i] = tf.matmul(self.s_ts[i], self.w_sa) + tf.matmul(self.w_ua, self.w_ua)
-            self.a_ts = tf.nn.softmax(tf.concat(1, eps))
-        return self.a_ts
+    def add_a_ts(self, s_ts, u_ts):
+        with tf.variable_scope('a', initializer = self.config.initializer()):
+            self.w_sa = tf.get_variable('w_sa', [self.config.s_dim, 1])
+            self.w_ua = tf.get_variable('w_ua', [self.config.u_dim, 1])
+            eps = [None for i in xrange(self.config.num_steps)]
+            for i in xrange(self.config.num_steps):
+                eps[i] = tf.matmul(s_ts[i], self.w_sa) + tf.matmul(u_ts[i], self.w_ua)
+            return tf.nn.softmax(tf.concat(1, eps))
 
     def add_c(self, a_ts, s_ts):
-        with tf.variable_scope('c', initializer = self.config.initializer):
-            self.c = tf.reduce_sum(tf.mul(tf.concat(2, [tf.expand_dims(s_t,-1) for s_t in self.s_ts]), tf.expand_dims(self.a_ts,-1)), reduction_indices=[2])
+        with tf.variable_scope('c', initializer = self.config.initializer()):
+            self.c = tf.reduce_sum(tf.mul(tf.concat(2, [tf.expand_dims(s_t,-1) for s_t in self.s_ts]), tf.expand_dims(self.a_ts, 1)), reduction_indices=[2])
         return self.c
 
-    def add_p(self, c):
-        with tf.variable_scope('p', initializer = self.config.initializer):
-            self.w_cp = tf.get_variable('w_cp', [self.config.s_dim])
-            self.p = tf.matmul(c, self.w_cp)
-        return self.p
+    def add_score_and_p(self, c):
+        with tf.variable_scope('p', initializer = self.config.initializer()):
+            self.w_cp = tf.get_variable('w_cp', [self.config.s_dim, self.config.num_classes])
+            score = tf.matmul(c, self.w_cp)
+        return score, tf.nn.softmax(score)
 
     def add_loss(self, y, p):
-        zero_p = tf.ones(self.batch_size) - self.p
-        mat_p = tf.transpose(tf.pack([zero_p,p]))
-        self.loss = tf.nn.softmax_cross_entropy_with_logits(mat_p, self.label_ph)
-        return self.loss
+        loss = tf.nn.softmax_cross_entropy_with_logits(p, self.label_ph)
+        return loss
 
-    def add_training_op(self, loss):
+    def add_regularization(self):
+        return self.config.reg * sum(map(tf.nn.l2_loss, [self.W_xu, self.W_ss, self.W_us, self.b_s, self.w_sa, self.w_ua, self.w_cp]))
+    
+    def add_training_op(self, loss, regularization):
         optimizer = tf.train.AdamOptimizer(self.config.lr)
-        self.train_op = optimizer.minimize(self.calculate_loss)
-        return self.train_op
+        training_op = optimizer.minimize(loss + regularization)
+        return training_op
 
     def run_epoch(self, session, data_iterator):
         losses = []
-        for (i,(x,y)) in enumerate(data_iterator(self.config.batch_size)):
-            feed = {self.input_ph: x, self.label:ph: y}
-            loss, _ = session.run[self.loss, self.train_op]
-            print 'step %d loss: %.2f' % (i, loss)
-        return np.mean(losses)
+        for (i,(x,y)) in enumerate(data_iterator):
+            feed = {self.input_ph[i]: x[i] for i in xrange(self.config.num_steps)}
+            feed[self.label_ph] = y
+            loss, _ = session.run([self.loss, self.training_op], feed_dict = feed)
+            print 'step %d loss: %.2f' % (i, np.mean(loss))
+        return np.mean(loss)
